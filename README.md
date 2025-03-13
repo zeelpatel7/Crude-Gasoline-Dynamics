@@ -19,11 +19,17 @@ This modular structure ensures efficient collaboration, allowing different compo
 
 .
 ├── time_series_models.rmd      # R Markdown file (ECM, VAR, ARIMAX)
+
 ├── time_series_models.pdf      # PDF report (ECM, VAR, ARIMAX)
+
 ├── time_series_models.html     # HTML report (ECM, VAR, ARIMAX)
+
 ├── lstm_model.ipynb            # Jupyter Notebook (LSTM)
+
 ├── lstm_model.html             # HTML report (LSTM)
+
 ├── render.sh                   # Script to generate reports
+
 └── docs/                       # Contains rendered HTML, PDF, and supporting files
 
 
