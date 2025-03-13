@@ -17,7 +17,6 @@ This modular structure ensures efficient collaboration, allowing different compo
 
 ## Repository Structure
 
-.
 ├── time_series_models.rmd      # R Markdown file (ECM, VAR, ARIMAX)
 
 ├── time_series_models.pdf      # PDF report (ECM, VAR, ARIMAX)
