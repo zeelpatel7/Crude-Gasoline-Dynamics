@@ -1,0 +1,1366 @@
+---
+title: "Final Project"
+author: "Team Hyssop"
+date: "2025-03-12"
+output: html_document
+---
+
+# Data Preprocessing
+
+## Loading the packages
+
+```{r}
+library(vars)
+library(tseries)
+library(forecast)
+library(readxl)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(Metrics)
+library(ggplot2)
+library(reshape2)
+library(tidyverse)
+library(lmtest)
+```
+
+
+## Loading the dataset
+
+```{r}
+data <- read_excel("data.xlsx")
+head(data)
+```
+
+
+```{r}
+data <- data %>%
+  mutate(Date = as.Date(Date))  
+```
+
+```{r}
+head(data$Date)
+```
+
+```{r}
+head(data)
+str(data)
+```
+
+```{r}
+# Check for missing values
+sum(is.na(data))
+colSums(is.na(data))
+```
+```{r}
+# Convert to time series (monthly data)
+crude_ts <- ts(data$`Crude Oil (Dollars per Barrel)`, frequency = 12, start = c(year(min(data$Date)), month(min(data$Date))))
+gasoline_ts <- ts(data$`Retail Gasoline Prices (Dollars per Gallon)`, frequency = 12, start = c(year(min(data$Date)), month(min(data$Date))))
+```
+
+## Splitting into training and testing
+
+```{r}
+# Training data (1993-04-01 to 2023-12-01)
+train_crude <- window(crude_ts, start = c(1993, 4), end = c(2023, 12))
+train_gasoline <- window(gasoline_ts, start = c(1993, 4), end = c(2023, 12))
+
+# Testing data (2024-01-01 to 2024-11-01)
+test_crude <- window(crude_ts, start = c(2024, 1), end = c(2024, 11))
+test_gasoline <- window(gasoline_ts, start = c(2024, 1), end = c(2024, 11))
+```
+
+
+# Exploratory Data Analysis
+
+## Plotting the times series data
+
+```{r}
+# Plot Crude Oil Prices
+autoplot(crude_ts) + 
+  labs(title = "Crude Oil Prices Over Time", y = "Dollars per Barrel")
+
+# Plot Gasoline Prices
+autoplot(gasoline_ts) + 
+  labs(title = "Gasoline Prices Over Time", y = "Dollars per Gallon")
+
+```
+
+
+## Checking for stationarity
+
+```{r}
+# ADF test for Crude Oil Prices
+adf_crude <- adf.test(na.omit(crude_ts))
+print(adf_crude)
+
+# ADF test for Gasoline Prices
+adf_gasoline <- adf.test(na.omit(gasoline_ts))
+print(adf_gasoline)
+```
+
+### Inference
+Both crude oil prices and gasoline prices are non-stationary (p-values > 0.05). This means:
+
+1. Their means and variances change over time.
+
+2. Modeling them directly (e.g., with ARIMA or linear regression) could lead to spurious results.
+
+## Checking for Co-integration
+
+```{r}
+# Cointegration test (Engle-Granger)
+coint_test <- lm(`Retail Gasoline Prices (Dollars per Gallon)` ~ `Crude Oil (Dollars per Barrel)`, data = data)
+spread <- residuals(coint_test)
+adf_spread <- adf.test(na.omit(spread))
+print(adf_spread)
+```
+
+### Inference
+
+1. The spread (residuals from the cointegration regression) is stationary (p-value = 0.027 < 0.05).
+
+Conclusion: Crude oil and gasoline prices are cointegrated!
+
+2. This means they share a long-term equilibrium relationship, and deviations (the spread) are mean-reverting.
+
+
+# Model 1: Error Correction Model (ECM)
+
+The ECM will model:
+
+1. Short-term changes in gasoline prices (ΔGasoline_t)
+
+2. Short-term changes in crude oil prices (ΔCrude_t)
+
+3. The lagged spread (Spread_{t-1}) to capture error correction.
+
+```{r}
+# Cointegration regression (training data)
+coint_model_train <- lm(train_gasoline ~ train_crude)
+beta_train <- coint_model_train$coefficients[2]
+
+# Calculate spread and lagged terms
+train_spread <- train_gasoline - beta_train * train_crude
+train_delta_gasoline <- diff(train_gasoline)
+train_delta_crude <- diff(train_crude)
+train_spread_lag1 <- stats::lag(train_spread, -1)  # Use stats::lag()
+train_spread_lag1 <- head(train_spread_lag1, -1)   # Remove last NA value
+
+# Combine into a dataframe
+train_df <- data.frame(
+  delta_gasoline = train_delta_gasoline,
+  delta_crude = train_delta_crude,
+  spread_lag1 = train_spread_lag1
+) %>% na.omit()
+
+# Train ECM
+ecm_train <- lm(delta_gasoline ~ delta_crude + spread_lag1, data = train_df)
+summary(ecm_train)
+```
+
+#### What we need to look for
+
+- Spread_Lag1 coefficient:
+
+1. Should be negative (mean-reversion: deviations from equilibrium correct over time).
+
+2. Should be statistically significant (p-value < 0.05).
+
+- R-squared: How much variance in gasoline price changes is explained by the model.
+
+```{r}
+historical_mean <- mean(train_spread, na.rm = TRUE)
+historical_sd <- sd(train_spread, na.rm = TRUE)
+
+
+# Convert time series to dataframe for plotting
+train_spread_df <- data.frame(
+  Date = as.Date(time(train_spread)),
+  Spread = as.numeric(train_spread)
+)
+
+# Plot spread with historical mean and thresholds
+ggplot(train_spread_df, aes(x = Date, y = Spread)) +
+  geom_line(color = "steelblue") +
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  labs(
+    title = "Spread (Training Data)",
+    subtitle = "Red line = Historical Mean | Green lines = ±1.5 σ Thresholds",
+    x = "Date",
+    y = "Spread (Gasoline - β*Crude)"
+  ) +
+  theme_minimal()
+
+```
+
+### Key Insights from graph
+
+#### Interpretation
+
+1. The blue line represents the spread (Gasoline - β * Crude) over time.
+
+2. The red dashed line is the historical mean of the spread.
+
+3. The green dashed lines are ±1.5 standard deviations from the mean, serving as thresholds.
+
+#### Inference
+
+1. The spread fluctuates but remains within a band around the mean, indicating cointegration.
+
+2. There are periods when the spread deviates significantly, which signals potential trading opportunities.
+
+3. If the spread moves too far from the mean, it suggests that gasoline may be overpriced or underpriced relative to crude.
+
+#### ECM Application
+
+1. Since gasoline and crude prices are cointegrated, any short-term deviation from equilibrium (spread) should eventually revert.
+
+2. The ECM model quantifies this reversion force, allowing us to predict adjustments and trade accordingly.
+
+
+### Conclusion
+
+1. Short-Term Impact of Crude Oil Prices:
+
+a. A "1 increase" in crude oil price leads to a "0.02/ gallon increase" in gasoline prices (statistically significant)
+
+b. This aligns with economic theory (crude oil is a key input cost for gasoline).
+
+2. Error Correction Mechanism: 
+
+a. The coefficient on Spread_Lag1 is negative (-0.108) and significant, confirming co- integration.
+
+b. Deviations from the long-run equilibrium (spread) are corrected at a rate of 10.8% per month.
+
+c. If the spread was +0.5/gallon last month, gasoline prices would drop by 0.054 / gallon this month to revert to equilibrium. 
+
+3. Model fit: 
+
+The model explains 53% of the variation in gasoline price changes, which is strong for economic data.
+
+4. Implications for Arbitrage
+
+Mean-Reverting Spread: The significant Spread_Lag1 term suggests the spread between gasoline and crude oil prices is predictable and mean-reverting.
+
+5. Trading Strategy:
+
+Buy the spread when it’s below its historical mean (expect it to rise).
+
+Sell the spread when it’s above its historical mean (expect it to fall).
+
+
+## Forecasting on testing data
+
+```{r}
+# Prepare test data with spread
+test_spread <- test_gasoline - beta_train * test_crude
+test_spread_lag1 <- stats::lag(test_spread, -1)  # Use stats::lag() on test_spread
+test_spread_lag1 <- head(test_spread_lag1, -1)   # Ensure it aligns correctly
+
+# Create test dataframe
+
+valid_length <- min(length(diff(test_crude)), length(test_spread_lag1))
+
+test_df <- data.frame(
+  delta_crude = diff(test_crude)[1:valid_length],
+  spread_lag1 = test_spread_lag1[1:valid_length]
+) %>% na.omit()
+
+# Predict delta_gasoline
+test_df$pred_delta_gasoline <- predict(ecm_train, newdata = test_df)
+
+# Convert delta to actual gasoline prices
+test_df$pred_gasoline <- test_gasoline[1:(length(test_gasoline)-1)] + test_df$pred_delta_gasoline
+```
+
+```{r}
+# Create plotting dataframe
+forecast_plot_df <- data.frame(
+  Date = as.Date(time(test_gasoline))[1:(length(test_gasoline)-1)],
+  Actual = as.numeric(test_gasoline[1:(length(test_gasoline)-1)]),
+  Forecasted = test_df$pred_gasoline
+)
+
+# Plot forecasted vs actual
+ggplot(forecast_plot_df, aes(x = Date)) +
+  geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = Forecasted, color = "Forecasted"), linewidth = 1, linetype = "dashed") +
+  labs(
+    title = "Forecasted vs Actual Gasoline Prices (Testing Data)",
+    x = "Date",
+    y = "Gasoline Price ($/Gallon)"
+  ) +
+  scale_color_manual(values = c("Actual" = "steelblue", "Forecasted" = "red")) +
+  theme_minimal()
+```
+
+### Key Insights from graph
+
+#### Interpretation
+
+1. Solid blue line: Actual gasoline prices.
+
+2. Dashed red line: Forecasted gasoline prices using the ECM.
+
+#### Key Insights
+
+1. The ECM model captures the general price movement of gasoline well but deviates at certain points.
+
+2. The predicted price leads to a mean-reverting expectation, indicating potential arbitrage opportunities.
+
+3. If the forecasted price is significantly different from the actual price, a trading opportunity exists:
+
+If forecasted price > actual price: Buy gasoline contracts.
+
+If forecasted price < actual price: Sell gasoline contracts.
+
+#### ECM Application
+
+1. The ECM helps forecast gasoline prices based on past deviations from the crude price spread.
+
+2. Short-term disequilibria between crude and gasoline prices are corrected using the model.
+
+```{r}
+# Prepare testing data with actual and forecasted spread
+test_spread_actual <- test_gasoline - beta_train * test_crude
+test_spread_forecast <- test_df$pred_gasoline - beta_train * test_crude[1:(length(test_crude)-1)]
+
+# Combine into a dataframe
+test_spread_plot_df <- data.frame(
+  Date = as.Date(time(test_spread_actual))[1:(length(test_spread_actual)-1)],
+  Actual = as.numeric(test_spread_actual)[1:(length(test_spread_actual)-1)],
+  Forecasted = test_spread_forecast
+) %>%
+  pivot_longer(cols = c(Actual, Forecasted), names_to = "Type", values_to = "Spread")
+
+# Plot testing data spread
+test_spread_plot <- ggplot(test_spread_plot_df, aes(x = Date, y = Spread, color = Type)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1.5 *historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1.5 *historical_sd, linetype = "dashed", color = "darkgreen") +
+  labs(
+    title = "Spread (Testing Data)",
+    subtitle = "Actual vs Forecasted Spread with Historical Thresholds",
+    x = "Date",
+    y = "Spread (Gasoline - β*Crude)",
+    color = ""
+  ) +
+  scale_color_manual(values = c("Actual" = "steelblue", "Forecasted" = "orange")) +
+  theme_minimal()
+
+print(test_spread_plot)
+```
+
+### Metrics on forecasting
+
+```{r}
+# Extract actual and forecasted values from testing data
+actual_gasoline <- test_gasoline[1:(length(test_gasoline)-1)]
+forecasted_gasoline <- test_df$pred_gasoline
+
+# Calculate residuals
+residuals <- actual_gasoline - forecasted_gasoline
+
+# Mean Absolute Error (MAE)
+mae <- mean(abs(residuals), na.rm = TRUE)
+
+# Root Mean Squared Error (RMSE)
+rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
+
+# Mean Absolute Percentage Error (MAPE)
+mape <- mean(abs(residuals / actual_gasoline), na.rm = TRUE) * 100
+
+# R-squared
+r_squared <- cor(actual_gasoline, forecasted_gasoline, use = "complete.obs")^2
+
+# Directional Accuracy (DA)
+direction_actual <- sign(diff(actual_gasoline))
+direction_forecast <- sign(diff(forecasted_gasoline))
+da <- mean(direction_actual == direction_forecast, na.rm = TRUE) * 100
+
+# Create accuracy table
+accuracy_table <- data.frame(
+  Metric = c("MAE ($/Gallon)", "RMSE ($/Gallon)", "MAPE (%)", "R-squared", "Directional Accuracy (%)"),
+  Value = c(
+    round(mae, 4),
+    round(rmse, 4),
+    round(mape, 2),
+    round(r_squared, 3),
+    round(da, 2)
+  )
+)
+
+# Display the accuracy table
+print(accuracy_table)
+
+```
+### Key Insights
+
+High Accuracy:
+
+1. MAPE of 2.24% is exceptional for energy price forecasting (industry benchmarks often exceed 5-10%).
+
+2. R² of 0.776 indicates the model captures most underlying patterns in gasoline price changes.
+
+Trading Viability:
+
+1. Directional accuracy of 66.67% means the model is profitable if transaction costs are low (e.g., 55-60% directional accuracy is often profitable).
+
+
+## Trading strategy on testing data (2024)
+
+```{r}
+print(test_df)
+print(test_gasoline)
+```
+
+
+```{r}
+# Compute Z-score for Predicted Spread (using ECM predictions)
+test_df <- test_df %>%
+  mutate(
+    Z_Score = (test_spread_forecast - historical_mean) / historical_sd
+  )
+
+# Calculate profits
+test_df <- test_df %>%
+  mutate(
+    Signal = case_when(
+      Z_Score < -1.5 ~ "Buy",
+      Z_Score > 1.5 ~ "Sell",
+      TRUE ~ "Hold"
+    )
+  )
+
+test_df <- test_df %>%
+  mutate(
+    Gasoline_Actual = test_gasoline[1:(length(test_gasoline)-1)],  # Match the length
+    Gasoline_Next = lead(Gasoline_Actual)  # Get next-period gasoline price
+  )
+
+# Compute returns based on actual gasoline price movements
+test_df <- test_df %>%
+  mutate(
+    Returns = case_when(
+      Signal == "Buy" ~ (Gasoline_Next - Gasoline_Actual) * 1000,  # Profit if gasoline price rises
+      Signal == "Sell" ~ (Gasoline_Actual - Gasoline_Next) * 1000,  # Profit if gasoline price falls
+      TRUE ~ 0
+    )
+  )
+
+# Compute total and cumulative profits
+total_profit <- sum(test_df$Returns, na.rm = TRUE)
+test_df <- test_df %>%
+  mutate(Cumulative_Profit = cumsum(Returns))
+
+# Print final profit result
+cat("\nTotal Profit from ECM Spread Strategy: $", round(total_profit, 2), "\n")
+
+# Display final dataframe
+print(test_df)
+```
+
+
+
+```{r}
+# Create a dataframe for plotting
+test_df <- test_df %>%
+  mutate(
+    Date = as.Date(time(test_spread))[1:(length(test_spread)-1)],
+    Spread_Forecast = test_spread_forecast  # Rename to ensure it's recognized as a column
+  )
+
+# Create a dataframe for plotting
+plot_df <- dplyr::select(test_df, Date, Spread_Forecast, Gasoline_Actual, Signal)
+
+
+# Plot Spread with Trading Signals
+spread_plot <- ggplot(plot_df, aes(x = Date)) +
+  geom_line(aes(y = test_spread_forecast, color = "ECM Forecasted Spread"), linewidth = 1) +  # ECM Spread Line
+  geom_point(aes(y = test_spread_forecast, color = Signal), size = 3) +  # Signal points on spread
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1 * historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1 * historical_sd, linetype = "dashed", color = "darkgreen") +
+  labs(
+    title = "ECM Forecasted Spread with Trading Signals",
+    x = "Date",
+    y = "Spread"
+  ) +
+  scale_color_manual(values = c("Buy" = "green", "Sell" = "red", "Hold" = "gray", "ECM Forecasted Spread" = "orange")) +
+  theme_minimal()
+
+# Plot Actual Gasoline Price with Trading Signals
+gasoline_plot <- ggplot(plot_df, aes(x = Date)) +
+  geom_line(aes(y = Gasoline_Actual, color = "Actual Gasoline Price"), linewidth = 1) +  # Actual Gasoline Price Line
+  geom_point(aes(y = Gasoline_Actual, color = Signal), size = 3) +  # Signal points on gasoline price
+  labs(
+    title = "Actual Gasoline Price with Trading Signals",
+    x = "Date",
+    y = "Gasoline Price"
+  ) +
+  scale_color_manual(values = c("Buy" = "green", "Sell" = "red", "Hold" = "gray", "Actual Gasoline Price" = "steelblue")) +
+  theme_minimal()
+
+# Print both plots
+print(spread_plot)
+print(gasoline_plot)
+
+```
+
+### Interpretation
+
+1.Orange line: Forecasted Spread between gasoline and crude.
+
+2.Gray dots: Hold signals (spread is within normal range).
+
+3. Red dots: Sell signals (spread is excessively high).
+
+4. Blue line: Actual Gasoline price data when signals are triggered
+
+### Key Insights
+
+1. When the spread crosses above the upper green line, it signals overvaluation → Sell gasoline.
+
+2. When the spread crosses below the lower red line, it signals undervaluation → Buy gasoline.
+
+3. A mean-reverting trading strategy can be implemented:
+- Sell when the spread is too high (expecting gasoline to fall relative to crude).
+
+- Buy when the spread is too low (expecting gasoline to rise relative to crude).
+
+### ECM Application
+
+1. The ECM model identifies deviations from equilibrium and determines when to trade based on spread levels.
+
+2. The model captures the short-term correction behavior in gasoline prices relative to crude.
+
+
+
+
+```{r}
+# Ensure Date and Cumulative Profit columns are correctly defined
+test_df <- test_df %>%
+  mutate(
+    Date = as.Date(time(test_spread))[1:(length(test_spread)-1)],  # Align dates properly
+    Cumulative_Profit = cumsum(replace_na(Returns, 0))  # Compute cumulative profit over time
+  )
+
+# Plot cumulative profit over time
+cumulative_profit_plot <- ggplot(test_df, aes(x = Date, y = Cumulative_Profit)) +
+  geom_line(color = "darkgreen", linewidth = 1) +  # Profit trend line
+  labs(
+    title = "Cumulative Profit from ECM Spread Strategy (2024)",
+    x = "Date",
+    y = "Cumulative Profit ($)"
+  ) +
+  theme_minimal()
+
+# Print the plot
+print(cumulative_profit_plot)
+
+```
+
+### Key Insights from Graph
+
+#### Interpretation
+
+1. The green line represents cumulative trading profits over time.
+
+2. The plot tracks profit accumulation as ECM-based trading signals are executed.
+
+
+#### Key Insights
+
+1. The strategy starts with no immediate profits, indicating a cautious entry into trades.
+
+2. A sharp increase in cumulative profit occurs around April, suggesting that key trading signals were correctly executed.
+
+3. The strategy remains stable with minimal drawdowns, indicating controlled risk management.
+
+4. By late 2024, cumulative profit increases significantly, demonstrating successful mean-reversion trades and well-timed execution.
+
+#### ECM Application
+
+1. The ECM-based strategy effectively identifies profitable spread deviations, allowing for timely trade execution.
+
+2. Buying when gasoline is underpriced and selling when it is overpriced relative to crude leads to steady profit accumulation.
+
+# Model 2: VAR 
+
+```{r}
+# ADF test for Crude Oil Prices
+adf_crude <- adf.test(na.omit(crude_ts))
+print(adf_crude)
+
+# ADF test for Gasoline Prices
+adf_gasoline <- adf.test(na.omit(gasoline_ts))
+print(adf_gasoline)
+```
+
+Differencing required because p-val > 0.05 
+
+```{R}
+# first order differencing
+train_crude_diff <- diff(train_crude, differences=1)
+train_gasoline_diff <- diff(train_gasoline, differences=1)
+
+test_crude_diff <- diff(test_crude, differences=1)
+test_gasoline_diff <- diff(test_gasoline, differences=1)
+```
+
+```{R}
+# recheck stationarity
+adf_crude_diff <- adf.test(train_crude_diff)
+adf_gasoline_diff <- adf.test(train_gasoline_diff)
+
+print(adf_crude_diff)
+print(adf_gasoline_diff)
+```
+
+p-val < 0.05, therefore stationary and can continue
+
+```{R}
+# determine optimal lag order using AIC/BIC 
+
+lag_selection <- VARselect(cbind(train_crude_diff, train_gasoline_diff), 
+                           lag.max = 10, type = "const")
+
+print(lag_selection$selection)
+
+```
+
+AIC = 10 and BIC = 1. We will use AIC for the optimal lags. 
+
+```{R}
+optimal_lag <- 10  
+
+var_model <- VAR(cbind(train_crude_diff, train_gasoline_diff), 
+                 p = optimal_lag, type = "const")
+
+summary(var_model)
+```
+
+```{R}
+serial_test <- serial.test(var_model, type = "BG")
+print(serial_test)
+```
+The Breusch-Godfrey test is better for small samples, and we get p values > 0.05 meaning there is no significant serial correlation in the residuals.
+
+```{R}
+irf_result <- irf(var_model, impulse = "train_crude_diff", response = "train_gasoline_diff", n.ahead = 10)
+plot(irf_result)
+```
+
+### Inference
+
+Black Line = Mean response of gasoline price changes to a crude oil price shock.
+Red Dashed Lines = 95% Bootstrap Confidence Interval (CI) (from 100 simulations).
+
+### Key Takeaway 
+
+We are visualizing the impack on gasoline prices with a shock on the crude oil prices. 
+- A positive shock in crude oil price changes causes gasoline price changes to rise sharply (peak at ~0.08 within the first 2 periods).
+- Gasoline prices react immediately to crude oil price changes (due to refining costs and market expectations).
+- This aligns with economic intuition: when crude oil prices rise, gasoline prices adjust but do not experience indefinite price changes.
+- The confidence bands (red dashed lines) are above 0 initially, confirming that the impact is statistically significant for the first 3-4 periods.
+
+```{R}
+# Forecasting future values
+var_forecast <- predict(var_model, n.ahead = length(test_crude_diff))
+
+forecast_vs_actual <- data.frame(
+  Date = seq(from = as.Date("2024-02-01"), by = "1 month", length.out = length(test_crude_diff)),  # Adjust dates dynamically
+  Actual_Crude = test_crude_diff,
+  Forecast_Crude = var_forecast$fcst$train_crude_diff[,1],  # First column is mean forecast
+  Actual_Gasoline = test_gasoline_diff,
+  Forecast_Gasoline = var_forecast$fcst$train_gasoline_diff[,1]
+)
+print(forecast_vs_actual)
+```
+
+```{R}
+# Forecasting future values
+var_forecast <- predict(var_model, n.ahead = length(test_crude_diff))
+
+# Convert differenced forecasts back to actual prices
+Forecast_Crude <- test_crude[length(test_crude)] + cumsum(var_forecast$fcst$train_crude_diff[,1])
+Forecast_Gasoline <- test_gasoline[length(test_gasoline)] + cumsum(var_forecast$fcst$train_gasoline_diff[,1])
+
+# Ensure all columns have the same length
+n <- min(length(test_crude_diff), length(Forecast_Crude), length(Forecast_Gasoline), length(test_gasoline))
+
+# Trim all variables to the same length
+test_crude <- test_crude[1:n]
+Forecast_Crude <- Forecast_Crude[1:n]
+test_gasoline <- test_gasoline[1:n]
+Forecast_Gasoline <- Forecast_Gasoline[1:n]
+
+# Create forecast_vs_actual dataframe with actual prices
+forecast_vs_actual <- data.frame(
+  Date = seq(from = as.Date("2024-02-01"), by = "1 month", length.out = n), 
+  Actual_Crude = test_crude,
+  Forecast_Crude = Forecast_Crude,
+  Actual_Gasoline = test_gasoline,
+  Forecast_Gasoline = Forecast_Gasoline
+)
+
+print(forecast_vs_actual)
+```
+
+```{R}
+Forecast_Gasoline <- forecast_vs_actual$Forecast_Gasoline
+Forecast_Crude <- forecast_vs_actual$Forecast_Crude
+
+# Find min and max values to set appropriate bounds
+y_min <- min(c(test_crude, Forecast_Crude)) - 10  # Extend lower bound slightly
+y_max <- max(c(test_crude, Forecast_Crude)) + 10  # Extend upper bound slightly
+
+# Crude Oil Forecast Plot (Actual vs Forecasted Prices)
+plot(test_crude, type="l", col="blue", lwd=2, ylab="Price", xlab="Time",
+     main="VAR Forecast vs Actual - Crude Oil",
+     ylim=c(y_min, y_max))  # Adjust y-axis bounds
+
+lines(Forecast_Crude, col="red", lwd=2, lty=2)  # Add forecast line
+legend("topleft", legend=c("Actual", "Forecast"), 
+       col=c("blue", "red"), lwd=2, lty=c(1,2), bty="n")
+
+```
+
+### Key Takeaway
+
+The VAR model captures the broader trends in gasoline and crude oil prices, making it a useful tool for understanding long-term price movements. However, its ability to react to rapid fluctuations is limited, potentially causing lags in signal generation. In gasoline prices, if the forecast struggles to align with sharp peaks and troughs, traders relying on it for short-term decision-making might face delayed entries or exits, increasing exposure to price swings.
+
+```{R}
+test_crude <- window(crude_ts, start = c(2024, 1), end = c(2024, 11))
+test_gasoline <- window(gasoline_ts, start = c(2024, 1), end = c(2024, 11))
+# Extract the slope coefficient for calculating spread 
+beta_train <- 0.031081434515637156
+
+# Actual spread in test set
+test_spread_actual <- test_gasoline - beta_train * test_crude
+
+# Forecasted spread using ARIMAX predictions
+test_spread_forecast <- Forecast_Gasoline - beta_train * test_crude
+
+# Compute historical mean and standard deviation from the training spread
+historical_spread <- train_gasoline - beta_train * train_crude
+historical_mean <- mean(historical_spread, na.rm = TRUE)
+historical_sd <- sd(historical_spread, na.rm = TRUE)
+
+# Combine into a dataframe
+test_spread_plot_df <- data.frame(
+  Date = as.Date(time(test_spread_actual))[1:(length(test_spread_actual))],
+  Actual = as.numeric(test_spread_actual)[1:(length(test_spread_actual))],
+  Forecasted = test_spread_forecast
+) %>%
+  pivot_longer(cols = c(Actual, Forecasted), names_to = "Type", values_to = "Spread")
+
+# Plot testing data spread
+test_spread_plot <- ggplot(test_spread_plot_df, aes(x = Date, y = Spread, color = Type)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  labs(
+    title = "Spread (Testing Data)",
+    subtitle = "Actual vs Forecasted Spread with Historical Thresholds",
+    x = "Date",
+    y = "Spread (Gasoline - β*Crude)",
+    color = ""
+  ) +
+  scale_color_manual(values = c("Actual" = "steelblue", "Forecasted" = "orange")) +
+  theme_minimal()
+
+print(test_spread_plot)
+```
+
+```{R}
+test_dates <- time(test_crude)
+test_dates <- test_dates[1:length(test_spread_forecast)]
+
+# Ensure test_spread_forecast aligns with test dates
+test_df <- data.frame(
+  Date = test_dates,  # Ensure this is correctly assigned
+  Spread_Forecast = test_spread_forecast
+)
+
+# Compute Z-score for spread forecast
+test_df <- test_df %>%
+  mutate(
+    Z_Score = (Spread_Forecast - historical_mean) / historical_sd
+  )
+
+# Generate Buy/Sell/Hold signals based on Z-score
+test_df <- test_df %>%
+  mutate(
+    Signal = case_when(
+      Z_Score < -1.5 ~ "Buy",
+      Z_Score > 1.5 ~ "Sell",
+      TRUE ~ "Hold"
+    )
+  )
+
+# Align actual gasoline prices properly
+test_df <- test_df %>%
+  mutate(
+    Gasoline_Actual = test_gasoline[1:(length(test_gasoline))],  # Match the length
+    Gasoline_Next = lead(Gasoline_Actual)  # Get next-period gasoline price
+  )
+
+# Compute trading returns based on signals
+test_df <- test_df %>%
+  mutate(
+    Returns = case_when(
+      Signal == "Buy" ~ (Gasoline_Next - Gasoline_Actual) * 1000,  # Profit if price rises
+      Signal == "Sell" ~ (Gasoline_Actual - Gasoline_Next) * 1000,  # Profit if price falls
+      TRUE ~ 0
+    )
+  )
+
+# Compute cumulative profit
+test_df <- test_df %>%
+  mutate(Cumulative_Profit = cumsum(coalesce(Returns, 0)))
+
+# Compute total profit
+total_profit <- sum(test_df$Returns, na.rm = TRUE)
+cat("\nTotal Profit from VAR Spread Strategy: $", round(total_profit, 2), "\n")
+```
+```{R}
+test_df
+```
+```{R}
+Actual_Gasoline <- forecast_vs_actual$Actual_Gasoline
+Actual_Crude <- forecast_vs_actual$Actual_Crude
+test_df <- test_df[-nrow(test_df), ]
+plot_df <- test_df %>%
+  mutate(
+    Spread_Actual = Actual_Gasoline - Actual_Crude
+  )
+
+spread_plot <- ggplot(plot_df, aes(x = Date)) +
+  
+  geom_line(aes(y = Spread_Forecast, color = "Forecasted Spread"), size = 1) +
+  
+  geom_point(aes(y = Spread_Forecast, color = Signal), size = 3) +
+
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  
+  labs(
+    title = "Actual vs. Forecasted Spread with Trading Signals",
+    x = "Date",
+    y = "Spread"
+  ) +
+  
+  scale_color_manual(values = c(
+    "Buy"               = "green",
+    "Sell"              = "red",
+    "Hold"              = "gray",
+    "Forecasted Spread" = "orange"  # Remove "Actual Spread"
+  )) +
+  
+  theme_minimal()
+
+# Keep gasoline plot unchanged
+gasoline_plot <- ggplot(plot_df, aes(x = Date)) +
+  geom_line(aes(y = Actual_Gasoline, color = "Actual Gasoline Price"), size = 1) +
+  geom_point(aes(y = Actual_Gasoline, color = Signal), size = 3) +
+  labs(
+    title = "Actual Gasoline Price with Trading Signals",
+    x = "Date",
+    y = "Gasoline Price"
+  ) +
+  scale_color_manual(values = c(
+    "Buy"                   = "green",
+    "Sell"                  = "red",
+    "Hold"                  = "gray",
+    "Actual Gasoline Price" = "steelblue"
+  )) +
+  theme_minimal()
+
+print(spread_plot)
+print(gasoline_plot)
+```
+
+```{R}
+# Ensure Date and Cumulative Profit columns are correctly defined
+test_df <- test_df %>%
+  mutate(
+    Cumulative_Profit = cumsum(replace_na(Returns, 0))  # Compute cumulative profit over time
+  )
+
+# Plot cumulative profit over time
+cumulative_profit_plot <- ggplot(test_df, aes(x = Date, y = Cumulative_Profit)) +
+  geom_line(color = "darkgreen", linewidth = 1) +  # Profit trend line
+  labs(
+    title = "Cumulative Profit from VAR Spread Strategy (2024)",
+    x = "Date",
+    y = "Cumulative Profit ($)"
+  ) +
+  theme_minimal()
+
+# Print the plot
+print(cumulative_profit_plot)
+```
+
+### Key Takeaway
+
+The Cumulative profit from the VAR spread strategy shows that we make $425 in profit. Though we have an upward trajectory in our profit curve, VAR might not be as well suited for volatile economic data like Gasoline and Crude Oil, and different models like ECM are better suited. 
+
+```{R}
+
+residuals_gasoline <- test_gasoline - Forecast_Gasoline
+residuals_crude <- test_crude - Forecast_Crude
+
+# Mean Absolute Error (MAE)
+mae_gasoline <- mean(abs(residuals_gasoline), na.rm = TRUE)
+mae_crude <- mean(abs(residuals_crude), na.rm = TRUE)
+
+# Root Mean Squared Error (RMSE)
+rmse_gasoline <- sqrt(mean(residuals_gasoline^2, na.rm = TRUE))
+rmse_crude <- sqrt(mean(residuals_crude^2, na.rm = TRUE))
+
+# Mean Absolute Percentage Error (MAPE)
+mape_gasoline <- mean(abs(residuals_gasoline / test_gasoline), na.rm = TRUE) * 100
+mape_crude <- mean(abs(residuals_crude / test_crude), na.rm = TRUE) * 100
+
+print(rmse_gasoline)
+print(rmse_crude)
+print(mape_gasoline)
+print(mape_crude)
+```
+
+### Key Takeaway
+
+The performance metrics for the VAR forecasting model indicate robust predictive capabilities for both gasoline and crude oil prices. For gasoline, the Root Mean Square Error (RMSE) is $0.239 per gallon, and the Mean Absolute Percentage Error (MAPE) is 9.59%, suggesting good accuracy and reliability of the VAR model in forecasting gasoline price fluctuations. However, the model shows relatively higher prediction errors for crude oil, with an RMSE of $5.64 per gallon and a MAPE of 10.23%, indicating slightly less precision when predicting crude oil price variations. 
+
+
+# Model 3: ARIMAX 
+
+ARIMA model requires a stationary time series similar to VAR model so we will use the differenced time series for crude oil and gasoline prices. However, before we move forward with the modelling, it would be helpful to understand the presence of any AR or MA terms in the time series. 
+
+```{r}
+# Recheck stationarity to make sure
+adf.test(train_crude_diff)
+adf.test(train_gasoline_diff)
+
+# Replot ACF and PACF after differencing to understand presence of AR and MA components
+acf(train_crude_diff, main="ACF of Differenced Crude Oil Prices")
+pacf(train_crude_diff, main="PACF of Differenced Crude Oil Prices")
+
+acf(train_gasoline_diff, main="ACF of Differenced Gasoline Prices")
+pacf(train_gasoline_diff, main="PACF of Differenced Gasoline Prices")
+```
+
+### Insights
+
+Stationarity: 
+* ADF test: Both crude oil prices and gasoline prices are stationary after differencing (p-values < 0.05).
+* ACF plot: ACF declines sharply for crude oil and gasoline prices, confirming stationarity. 
+
+Crude Oil Prices (Differenced):
+* ACF pattern: Shows significant autocorrelation at lag 1 that cuts off after that, suggesting an MA(1) component.
+* PACF pattern: Shows a significant spike at lag 1 with a sharp decline afterward, suggesting an AR(1) component.
+* The combined pattern suggests an ARMA(1,1) structure could be appropriate.
+
+Gasoline Prices (Differenced):
+* ACF pattern: Shows significant autocorrelation at lag 1 and a smaller but noticeable correlation at lag 2, gradually tailing off, suggesting possible MA(1) or MA(2) components.
+* PACF pattern: Shows a significant spike at lag 1, suggesting possible AR(1) structure.
+
+
+```{r}
+# Fit auto ARIMA for gasoline and crude oil prices
+model_gasoline <- auto.arima(train_gasoline_diff, stepwise = TRUE, trace = TRUE)
+model_crude <- auto.arima(train_crude_diff, stepwise = TRUE, trace = TRUE)
+
+# Print the selected (p, d, q) values
+cat("Gasoline ARIMA Order:", arimaorder(model_gasoline), "\n")
+cat("Crude ARIMA Order:", arimaorder(model_crude), "\n")
+
+```
+
+### Takeaways
+
+Crude Oil Prices: The PACF suggested an AR(1) component, which aligns with the auto.arima selection of ARIMA(1,0,0). This means crude oil prices follow a simple autoregressive pattern where today's price change is primarily influenced by yesterday's change.
+
+Gasoline Prices: The ACF suggested MA(1) or MA(2), while PACF hinted at an AR(1) structure. However, auto.arima selected ARIMA(0,0,1), meaning gasoline prices are best explained by a moving average process where the most recent shock (error term) has a direct impact on today's price change.
+
+```{r}
+# Fit ARIMA models
+gasoline_model <- Arima(train_gasoline_diff, order = c(0,0,1))
+crude_model <- Arima(train_crude_diff, order = c(1,0,0))
+```
+
+
+```{r}
+# Forecast on test set
+gasoline_forecast <- forecast(gasoline_model, h = length(test_gasoline_diff))
+crude_forecast <- forecast(crude_model, h = length(test_crude_diff))
+
+# Convert differenced forecasts back to actual prices
+actual_gasoline_prices <- cumsum(c(last(train_gasoline), test_gasoline_diff))
+forecasted_gasoline_prices <- cumsum(c(last(train_gasoline), gasoline_forecast$mean))
+
+actual_crude_prices <- cumsum(c(last(train_crude), test_crude_diff))
+forecasted_crude_prices <- cumsum(c(last(train_crude), crude_forecast$mean))
+
+# Plot
+plot(actual_gasoline_prices, type="l", col="blue", lwd=2, ylab="Price", xlab="Time", main="Gasoline Prices: Forecast vs Actual")
+lines(forecasted_gasoline_prices, col="red", lwd=2, lty=2)
+legend("topleft", legend=c("Actual", "Forecast"), col=c("blue", "red"), lwd=2, lty=c(1,2))
+
+# Plot
+plot(actual_crude_prices, type="l", col="blue", lwd=2, ylab="Price", xlab="Time", main="Crude Prices: Forecast vs Actual")
+lines(forecasted_crude_prices, col="red", lwd=2, lty=2)
+legend("topleft", legend=c("Actual", "Forecast"), col=c("blue", "red"), lwd=2, lty=c(1,2))
+```
+
+### Key Takeaways
+
+The ARIMA model struggles to accurately forecast crude oil and gasoline prices, producing a stagnant forecast while actual prices fluctuate up and down. This limitation arises because ARIMA relies solely on past price data, ignoring external factors that influence price movements. To improve forecasting performance, we can incorporate exogenous variables using ARIMAX and assess whether it captures these fluctuations more effectively.
+
+```{r}
+# Select the exogenous variables
+exog_vars <- data[, c("U.S. Percent Utilization of Refinery Operable Capacity %",
+                      "Avg of US Ending Stock of Motor Gasoline",
+                      "Average of U.S. Ending Stocks excluding SPR of Crude Oil",
+                      "U.S. Product Supplied of Finished Motor Gasoline",
+                      "Heating Degree Days",
+                      "Cooling Degree Days")]
+
+# Make it a time series object
+exog_ts <- ts(exog_vars, start = c(year(min(data$Date)), month(min(data$Date))), frequency = 12)
+
+# Training data (1993-04 to 2023-12)
+train_exog <- window(exog_ts, start = c(1993, 4), end = c(2023, 12))
+
+# Testing data (2024-01 to 2024-11)
+test_exog <- window(exog_ts, start = c(2024, 1), end = c(2024, 11))
+```
+
+Since we are introducing different variables to the model for ARIMAX, we need to ensure the new time series with exogenous variables is also stationary to proceed with modelling. 
+
+```{r}
+# Check for stationarity
+apply(train_exog, 2, adf.test)
+```
+
+### Inference
+
+A p-val < 0.05 for the ADF Test indicates a stationary series. Keeping that in mind we can if any of the variiables require differencing.
+
+Stationary:
+
+* U.S. Percent Utilization of Refinery Operable Capacity (p = 0.01)
+* Heating Degree Days (p = 0.01)
+* Cooling Degree Days (p = 0.01)
+
+Non-Stationary:
+
+* Avg of U.S. Ending Stock of Motor Gasoline (p = 0.729)
+* Average of U.S. Ending Stocks excluding SPR of Crude Oil (p = 0.34)
+* U.S. Product Supplied of Finished Motor Gasoline (p = 0.24)
+
+Since there are variables that have non-stationary time series, we need to difference our time series.
+
+```{r}
+# Apply first order differencing
+train_exog_diff <- diff(train_exog, differences=1)
+test_exog_diff <- diff(test_exog, differences=1)
+
+# Check stationarity again
+apply(train_exog_diff, 2, adf.test)
+```
+
+### Inference
+
+Here we can see that the p-value for all the variables are now less than 0.05, meaning that they are stationary. We can now proceed with our ARIMAX model. 
+
+```{r}
+# Fit ARIMAX model for gasoline and crude oil prices
+arimax_model_gasoline <- auto.arima(train_gasoline_diff, xreg = train_exog_diff)
+arimax_model_crude <- auto.arima(train_crude_diff, xreg = train_exog_diff)
+
+# Forecasting
+arimax_forecast_gasoline <- forecast(arimax_model_gasoline, xreg = test_exog_diff)
+arimax_forecast_crude <- forecast(arimax_model_crude, xreg = test_exog_diff)
+
+# Preparing data for plotting and accuracy metrics
+forecasted_gasoline_prices <- diffinv(arimax_forecast_gasoline$mean, xi = last(train_gasoline))
+forecasted_crude_prices <- diffinv(arimax_forecast_crude$mean, xi = last(train_crude))
+
+```
+
+```{r}
+# Compute residuals
+residuals_gasoline <- test_gasoline - forecasted_gasoline_prices
+residuals_crude <- test_crude - forecasted_crude_prices
+
+# Mean Absolute Error (MAE)
+mae_gasoline <- mean(abs(residuals_gasoline), na.rm = TRUE)
+mae_crude <- mean(abs(residuals_crude), na.rm = TRUE)
+
+# Root Mean Squared Error (RMSE)
+rmse_gasoline <- sqrt(mean(residuals_gasoline^2, na.rm = TRUE))
+rmse_crude <- sqrt(mean(residuals_crude^2, na.rm = TRUE))
+
+# Mean Absolute Percentage Error (MAPE)
+mape_gasoline <- mean(abs(residuals_gasoline / test_gasoline), na.rm = TRUE) * 100
+mape_crude <- mean(abs(residuals_crude / test_crude), na.rm = TRUE) * 100
+
+# R-squared
+r_squared_gasoline <- cor(test_gasoline, forecasted_gasoline_prices, use = "complete.obs")^2
+r_squared_crude <- cor(test_crude, forecasted_crude_prices, use = "complete.obs")^2
+
+# Directional Accuracy (DA) - Fixed
+direction_actual_gasoline <- sign(diff(test_gasoline))
+direction_forecast_gasoline <- sign(diff(forecasted_gasoline_prices))
+da_gasoline <- mean(direction_actual_gasoline == direction_forecast_gasoline, na.rm = TRUE) * 100
+
+direction_actual_crude <- sign(diff(test_crude))
+direction_forecast_crude <- sign(diff(forecasted_crude_prices))
+da_crude <- mean(direction_actual_crude == direction_forecast_crude, na.rm = TRUE) * 100
+
+# Create accuracy tables
+accuracy_gasoline <- data.frame(
+  Metric = c("MAE ($/Gallon)", "RMSE ($/Gallon)", "MAPE (%)", "R-squared", "Directional Accuracy (%)"),
+  Value = c(
+    round(mae_gasoline, 4),
+    round(rmse_gasoline, 4),
+    round(mape_gasoline, 2),
+    round(r_squared_gasoline, 3),
+    round(da_gasoline, 2)
+  )
+)
+
+accuracy_crude <- data.frame(
+  Metric = c("MAE ($/Barrel)", "RMSE ($/Barrel)", "MAPE (%)", "R-squared", "Directional Accuracy (%)"),
+  Value = c(
+    round(mae_crude, 4),
+    round(rmse_crude, 4),
+    round(mape_crude, 2),
+    round(r_squared_crude, 3),
+    round(da_crude, 2)
+  )
+)
+
+# Display accuracy tables
+print("Gasoline Forecasting Accuracy:")
+print(accuracy_gasoline)
+
+print("Crude Oil Forecasting Accuracy:")
+print(accuracy_crude)
+```
+
+### Gasoline Forecast Insights
+
+* Forecast Accuracy: MAE of $0.13 and RMSE of $0.16 indicate low forecast errors, suggesting reasonable short-term accuracy. MAPE of 3.84% confirms this.
+* Model Fit: R² of 0.058 is very low, meaning the ARIMAX model explains little of the variation in gasoline prices. This suggests that key explanatory variables may be missing or the relationship is weak.
+* Directional Accuracy: At 66.67%, the model captures price movement direction reasonably well but leaves room for improvement.
+
+### Crude Oil Forecast Insights
+
+* Forecast Accuracy: MAE of $5.13 and RMSE of $5.87 indicate relatively high forecast errors. MAPE of 6.54% shows a higher percentage error compared to gasoline, implying greater volatility or model inefficiency.
+* Model Fit: R² of 0.239 suggests the model captures some variance but still struggles to explain crude oil price fluctuations effectively.
+* Directional Accuracy: At 55.56%, the model is only slightly better than random guessing in predicting price direction. This suggests that crude oil price movements are influenced by factors not well captured in the current model.
+
+```{r}
+# Gasoline Forecast Plot (Actual Prices)
+plot(test_gasoline, type="l", col="blue", lwd=2, ylab="Price", xlab="Time", 
+     main="ARIMAX Forecast vs Actual - Gasoline")
+lines(forecasted_gasoline_prices, col="red", lwd=2, lty=2)
+legend("topleft", legend=c("Actual", "Forecast"), col=c("blue", "red"), lwd=2, lty=c(1,2))
+
+# Crude Oil Forecast Plot (Actual Prices)
+plot(test_crude, type="l", col="blue", lwd=2, ylab="Price", xlab="Time", 
+     main="ARIMAX Forecast vs Actual - Crude Oil")
+lines(forecasted_crude_prices, col="red", lwd=2, lty=2)
+legend("topleft", legend=c("Actual", "Forecast"), col=c("blue", "red"), lwd=2, lty=c(1,2))
+```
+
+### Key takeaways
+
+The ARIMAX forecast shows noticeable improvement over ARIMA, as it captures some fluctuations rather than producing a flat line. However, it still lags behind actual price movements, reacting slowly to sudden spikes or drops. This suggests the model captures trend direction but struggles with responsiveness to rapid market changes.
+
+```{r}
+# Extract the slope coefficient for calculating spread 
+beta_train <- coef(lm(train_gasoline ~ train_crude))[2] 
+
+# Actual spread in test set
+test_spread_actual <- test_gasoline - beta_train * test_crude
+
+# Forecasted spread using ARIMAX predictions
+test_spread_forecast <- forecasted_gasoline_prices - beta_train * test_crude
+
+# Compute historical mean and standard deviation from the training spread
+historical_spread <- train_gasoline - beta_train * train_crude
+historical_mean <- mean(historical_spread, na.rm = TRUE)
+historical_sd <- sd(historical_spread, na.rm = TRUE)
+
+# Combine into a dataframe
+test_spread_plot_df <- data.frame(
+  Date = as.Date(time(test_spread_actual))[1:(length(test_spread_actual)-1)],
+  Actual = as.numeric(test_spread_actual)[1:(length(test_spread_actual)-1)],
+  Forecasted = test_spread_forecast
+) %>%
+  pivot_longer(cols = c(Actual, Forecasted), names_to = "Type", values_to = "Spread")
+
+# Plot testing data spread
+test_spread_plot <- ggplot(test_spread_plot_df, aes(x = Date, y = Spread, color = Type)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1.5*historical_sd, linetype = "dashed", color = "darkgreen") +
+  labs(
+    title = "Spread (Testing Data)",
+    subtitle = "Actual vs Forecasted Spread with Historical Thresholds",
+    x = "Date",
+    y = "Spread (Gasoline - β*Crude)",
+    color = ""
+  ) +
+  scale_color_manual(values = c("Actual" = "steelblue", "Forecasted" = "orange")) +
+  theme_minimal()
+
+print(test_spread_plot)
+```
+
+```{r}
+test_dates <- time(test_crude)
+test_dates <- test_dates[1:length(test_spread_forecast)]
+
+# Ensure test_spread_forecast aligns with test dates
+test_df <- data.frame(
+  Date = test_dates,  # Ensure this is correctly assigned
+  Spread_Forecast = test_spread_forecast
+)
+
+# Compute Z-score for spread forecast
+test_df <- test_df %>%
+  mutate(
+    Z_Score = (Spread_Forecast - historical_mean) / historical_sd
+  )
+
+# Generate Buy/Sell/Hold signals based on Z-score
+test_df <- test_df %>%
+  mutate(
+    Signal = case_when(
+      Z_Score < -1.5 ~ "Buy",
+      Z_Score > 1.5 ~ "Sell",
+      TRUE ~ "Hold"
+    )
+  )
+
+# Align actual gasoline prices properly
+test_df <- test_df %>%
+  mutate(
+    Gasoline_Actual = test_gasoline[-length(test_gasoline)],  # Remove last value to match
+    Gasoline_Next = lead(Gasoline_Actual)  # Next-period gasoline price
+  )
+
+# Compute trading returns based on signals
+test_df <- test_df %>%
+  mutate(
+    Returns = case_when(
+      Signal == "Buy" ~ (Gasoline_Next - Gasoline_Actual) * 1000,  # Profit if price rises
+      Signal == "Sell" ~ (Gasoline_Actual - Gasoline_Next) * 1000,  # Profit if price falls
+      TRUE ~ 0
+    )
+  )
+
+# Compute cumulative profit
+test_df <- test_df %>%
+  mutate(Cumulative_Profit = cumsum(coalesce(Returns, 0)))
+
+# Compute total profit
+total_profit <- sum(test_df$Returns, na.rm = TRUE)
+cat("\nTotal Profit from ARIMAX Spread Strategy: $", round(total_profit, 2), "\n")
+```
+
+```{r}
+test_df <- test_df %>%
+  mutate(Date = as.Date(Date))  # Ensure Date is of type Date
+
+colnames(test_df) <- make.names(colnames(test_df))
+```
+
+```{r}
+# Create a dataframe for plotting
+test_df <- test_df %>%
+  mutate(
+    Spread_Forecast = test_spread_forecast  # Rename to ensure it's recognized as a column
+  )
+
+# Create a dataframe for plotting
+#plot_df <- test_df %>%
+  #select(Date, Spread_Forecast, Gasoline_Actual, Signal)
+
+plot_df <- dplyr::select(test_df, Date, Spread_Forecast, Gasoline_Actual, Signal)
+
+
+# Plot Spread with Trading Signals
+spread_plot <- ggplot(plot_df, aes(x = Date)) +
+  geom_line(aes(y = test_spread_forecast, color = "ECM Forecasted Spread"), linewidth = 1) +  # ECM Spread Line
+  geom_point(aes(y = test_spread_forecast, color = Signal), size = 3) +  # Signal points on spread
+  geom_hline(yintercept = historical_mean, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = historical_mean + 1 * historical_sd, linetype = "dashed", color = "darkgreen") +
+  geom_hline(yintercept = historical_mean - 1 * historical_sd, linetype = "dashed", color = "darkgreen") +
+  labs(
+    title = "ARIMAX Forecasted Spread with Trading Signals",
+    x = "Date",
+    y = "Spread"
+  ) +
+  scale_color_manual(values = c("Buy" = "green", "Sell" = "red", "Hold" = "gray", "ECM Forecasted Spread" = "orange")) +
+  theme_minimal()
+
+# Plot Actual Gasoline Price with Trading Signals
+gasoline_plot <- ggplot(plot_df, aes(x = Date)) +
+  geom_line(aes(y = Gasoline_Actual, color = "Actual Gasoline Price"), linewidth = 1) +  # Actual Gasoline Price Line
+  geom_point(aes(y = Gasoline_Actual, color = Signal), size = 3) +  # Signal points on gasoline price
+  labs(
+    title = "Actual Gasoline Price with Trading Signals",
+    x = "Date",
+    y = "Gasoline Price"
+  ) +
+  scale_color_manual(values = c("Buy" = "green", "Sell" = "red", "Hold" = "gray", "Actual Gasoline Price" = "steelblue")) +
+  theme_minimal()
+
+# Print both plots
+print(spread_plot)
+print(gasoline_plot)
+```
+
+```{r}
+# Ensure Date and Cumulative Profit columns are correctly defined
+test_df <- test_df %>%
+  mutate(
+    Cumulative_Profit = cumsum(replace_na(Returns, 0))  # Compute cumulative profit over time
+  )
+
+# Plot cumulative profit over time
+cumulative_profit_plot <- ggplot(test_df, aes(x = Date, y = Cumulative_Profit)) +
+  geom_line(color = "darkgreen", linewidth = 1) +  # Profit trend line
+  labs(
+    title = "Cumulative Profit from ARIMAX Spread Strategy (2024)",
+    x = "Date",
+    y = "Cumulative Profit ($)"
+  ) +
+  theme_minimal()
+
+# Print the plot
+print(cumulative_profit_plot)
+
+```
+
+### Key Takeaway 
+
+The ARIMAX forecast captures price fluctuations influenced by exogenous variables but lags behind actual price changes, reacting slowly to sudden spikes or drops. This delayed responsiveness likely contributed to early losses due to misaligned trade signals. However, as market conditions realigned with historical patterns, the model effectively identified broader trends, leading to a strong upward profit trend in the second half, surpassing breakeven and reaching $246. While the model can generate profitable signals over time, its lag in capturing short-term volatility may result in missed opportunities or increased risk in fast-moving markets.
+
+
+
+
+
