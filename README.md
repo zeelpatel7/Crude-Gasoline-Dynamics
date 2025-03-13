@@ -4,8 +4,8 @@ Welcome to our Time Series Forecasting repository, where we analyze and compare 
 
 ## 📄 Reports
 
-🔹 [📑 Time Series Models (ECM, VAR, ARIMAX) - PDF](time_series_models.pdf)  
-🔹 [🌐 Time Series Models (ECM, VAR, ARIMAX) - HTML](time_series_models.html)  
+🔹 [📑 Final Report - PDF](time_series_models.pdf)  
+🔹 [🌐 Time Series Models (ECM, VAR, ARIMAX) - HTML](docs/ECM%2C%20VAR%2C%20ARIMAX.html)  
 🔹 [📑 LSTM Model - Jupyter Notebook](lstm_model.ipynb)  
 🔹 [🌐 LSTM Model - HTML](lstm_model.html)  
 
