@@ -6,8 +6,11 @@ Welcome to our Time Series Forecasting repository, where we analyze and compare 
 This repository includes a structured time series forecasting analysis, focusing on different statistical and machine learning models. The analysis is divided into the following components:
 
 1️⃣ Exploratory Data Analysis (EDA) – Visualizing trends, seasonality, and statistical properties.
+
 2️⃣ ECM, VAR, and ARIMAX Models – Implemented in R Markdown and compiled into a PDF and HTML report.
+
 3️⃣ LSTM Model – Implemented in Jupyter Notebook (Python) with an HTML output.
+
 4️⃣ Results & Conclusion – Comparing model performance and cumulative profits.
 
 This modular structure ensures efficient collaboration, allowing different components to be worked on independently while producing a unified analysis.
