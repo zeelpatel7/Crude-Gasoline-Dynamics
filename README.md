@@ -2,13 +2,6 @@
 
 Welcome to our Time Series Forecasting repository, where we analyze and compare the performance of ECM, VAR, ARIMAX, and LSTM models for predicting gasoline prices. This project applies econometric and deep learning approaches to assess forecasting accuracy and profitability.
 
-## 📄 Reports
-
-🔹 [📑 Final Report - PDF](time_series_models.pdf)  
-🔹 [🌐 Time Series Models (ECM, VAR, ARIMAX) - HTML](docs/ECM%2C%20VAR%2C%20ARIMAX.html)  
-🔹 [📑 LSTM Model - Jupyter Notebook](lstm_model.ipynb)  
-🔹 [🌐 LSTM Model - HTML](lstm_model.html)  
-
 
 ## Project Overview
 This repository includes a structured time series forecasting analysis, focusing on different statistical and machine learning models. The analysis is divided into the following components:
