@@ -30,9 +30,13 @@ This modular structure ensures efficient collaboration, allowing different compo
 
 ## Introduction
 The relationship between gasoline and crude oil prices has long been recognized as a crucial indicator in energy markets, primarily due to their inherent cointegration. This close relationship exists because Gasoline is a refined derivative of Crude Oil. Understanding and leveraging this relationship allows traders and stakeholders to optimize their decision-making and profitability. In this project, we analyzed historical gasoline and crude oil pricing data to explore their cointegration characteristics thoroughly. We employed four distinct forecasting models to predict gasoline prices for the year 2024:
+
+
 1. ECM (Error Correction Model)
 2. VAR (Vector Autoregression):
 3. ARIMAX (Auto-Regressive Integrated Moving Average with eXogenous Variables)
 4. LSTM (Long Short-Term Memory):
+
+
 Using these predictions, we developed tailored pricing strategies designed for effective trading. Subsequently, we evaluated the efficacy of each forecasting approach by calculating and comparing their respective profitability, providing valuable insights into model performance and the strategic implications for trading in energy commodities. We also hypothesize that LSTM will have the ability to capture the intricate collinear relationship between crude oil and gasoline prices most effectively.
 
